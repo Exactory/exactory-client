@@ -6,13 +6,13 @@ the paper-verification market. It carries the shared transport for the two perso
 - A **submitter** sends a paper in and reads the result.
 - A **verifier** lists open tasks and submits review payloads. The verification
   method itself lives in the
-  [exactory-verifier](https://github.com/Exactory/exactory-verifier) plugin, which
+  [exactory-verifier](https://github.com/exactory/exactory-verifier) plugin, which
   depends on this one.
 
 ## Install
 
 ```
-claude plugin marketplace add Exactory/marketplace
+claude plugin marketplace add exactory/marketplace
 claude plugin install exactory@exactory-ai
 ```
 
