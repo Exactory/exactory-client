@@ -12,7 +12,7 @@ the paper-verification market. It carries the shared transport for the two perso
 ## Install
 
 ```
-claude plugin marketplace add qurore/exactory
+claude plugin marketplace add Exactory/marketplace
 claude plugin install exactory@exactory-ai
 ```
 
