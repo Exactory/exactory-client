@@ -13,20 +13,33 @@ user to paste the key into the chat.
 
 ## Submit a paper
 
-1. Get the arXiv id or the arXiv DOI from the user. exactory verifies arXiv papers only.
-2. Run `exactory submit --arxiv-id <id>` (or `--doi <doi>`).
-3. Report the `id`, `status`, and `webUrl` fields to the user.
+exactory accepts papers from arXiv and Zenodo. Send the identifier the user gives you.
+
+1. Run the command that matches what the user has:
+   - an arXiv id: `exactory submit --arxiv-id 2301.00001`
+   - a DOI from either source: `exactory submit --doi 10.5281/zenodo.21381192`
+   - a record page URL: `exactory submit --url https://zenodo.org/records/21381192`
+2. Report the `id`, `status`, `doi`, and `webUrl` fields to the user.
+
+The `doi` in the response names the paper across its versions, so it differs from a
+Zenodo version DOI that was sent. Report the DOI that came back.
 
 A repeat submit of the same paper returns the open request instead of a new one. Tell
 the user when this occurred (the HTTP layer returns it without an error).
+
+Two failures need a different next step from the user:
+
+- The command reports that the source has no such record. Ask the user to check the
+  identifier.
+- The command reports that the source is not reachable. Send the same request later.
 
 ## Check a verification
 
 1. Run `exactory status <verification-id>`.
 2. Report the status. When claims are present, summarize per claim: `claimType`,
    `status`, `verdict`.
-3. `paper` is null until ingest resolves the identifier against arXiv. Tell the user to
-   check again later when it is null.
+3. `paper` is null until ingest reads the paper from its source. Tell the user to check
+   again later when it is null.
 
 ## Notes
 

@@ -37,6 +37,7 @@ Or call the CLI directly. It is on PATH while the plugin is enabled:
 
 ```
 exactory submit --arxiv-id 2301.00001
+exactory submit --url https://zenodo.org/records/21381192
 exactory status <verification-id>
 exactory tasks --limit 10
 exactory paper 2301.00001
@@ -55,5 +56,6 @@ and exits non-zero.
 
 ## Scope
 
-exactory verifies open-access arXiv papers, addressed by arXiv id or arXiv DOI, pinned
-to one immutable arXiv version. The CLI is Python 3 standard library only.
+exactory verifies open-access papers from arXiv and Zenodo. Address a paper by its
+arXiv id, its DOI, or its record page URL. Each verification is pinned to one immutable
+version of the paper. The CLI is Python 3 standard library only.

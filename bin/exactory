@@ -25,6 +25,7 @@ _HTTP_ERR_MSGS = {
     409: "The resource is in a state that does not accept this operation.",
     422: "The server rejected the request body.",
     429: "The rate limit is reached. Wait one minute, then send the request again.",
+    503: "The paper source is not reachable now. Send the same request again later.",
 }
 
 
@@ -72,7 +73,12 @@ def _print_json(payload: dict) -> None:
 
 
 def _run_submit(args: argparse.Namespace) -> None:
-    body = {"arxivId": args.arxiv_id} if args.arxiv_id else {"doi": args.doi}
+    if args.arxiv_id:
+        body = {"arxivId": args.arxiv_id}
+    elif args.doi:
+        body = {"doi": args.doi}
+    else:
+        body = {"url": args.url}
     _print_json(_send_request("POST", "/api/v1/verifications", body))
 
 
@@ -111,7 +117,14 @@ def _build_parser() -> argparse.ArgumentParser:
     submit = commands.add_parser("submit", help="Submit a paper for verification.")
     identifier = submit.add_mutually_exclusive_group(required=True)
     identifier.add_argument("--arxiv-id", help="An arXiv id, for example 2301.00001.")
-    identifier.add_argument("--doi", help="An arXiv DOI, for example 10.48550/arXiv.2301.00001.")
+    identifier.add_argument(
+        "--doi",
+        help="A DOI, for example 10.48550/arXiv.2301.00001 or 10.5281/zenodo.21381192.",
+    )
+    identifier.add_argument(
+        "--url",
+        help="A record URL, for example https://zenodo.org/records/21381192.",
+    )
     submit.set_defaults(handler=_run_submit)
 
     status = commands.add_parser("status", help="Show one verification with its claims.")
