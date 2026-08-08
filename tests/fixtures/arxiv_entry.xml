@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/2401.01234v1</id>
+    <published>2024-01-03T18:00:00Z</published>
+    <title>Deterministic Citation Verification for Automated Research</title>
+    <author><name>Alice Example</name></author>
+    <author><name>Bob Sample</name></author>
+    <arxiv:primary_category xmlns:arxiv="http://arxiv.org/schemas/atom" term="cs.DL"/>
+  </entry>
+</feed>

@@ -1,0 +1,19 @@
+{
+  "status": "ok",
+  "message-type": "work",
+  "message": {
+    "DOI": "10.1234/exact.5678",
+    "type": "journal-article",
+    "title": ["Predicting Citation Impact with Cohort Percentiles"],
+    "subtitle": [],
+    "author": [
+      {"given": "Carol", "family": "Instance"},
+      {"given": "Dana", "family": "Case"}
+    ],
+    "issued": {"date-parts": [[2023, 5, 10]]},
+    "container-title": ["Journal of Deterministic Examples"],
+    "volume": "12",
+    "issue": "3",
+    "page": "45-67"
+  }
+}

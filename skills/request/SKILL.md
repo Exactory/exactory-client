@@ -24,8 +24,8 @@ exactory accepts papers from arXiv and Zenodo. Send the identifier the user give
 The `doi` in the response names the paper across its versions, so it differs from a
 Zenodo version DOI that was sent. Report the DOI that came back.
 
-A repeat submit of the same paper returns the open request instead of a new one. Tell
-the user when this occurred (the HTTP layer returns it without an error).
+On a repeat submit of the same paper, the command prints "The server returned the
+existing open request for this paper." Relay that line to the user.
 
 Two failures need a different next step from the user:
 

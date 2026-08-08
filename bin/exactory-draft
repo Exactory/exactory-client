@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""exactory-draft: draft workspace setup and Zenodo deposit.
+
+Two commands:
+  init     - create the draft workspace layout and .exactory/draft.json
+  deposit  - upload the built PDF (and optional sources) to Zenodo
+
+Deposits go to the Zenodo sandbox and stay in the draft state by default.
+--production targets zenodo.org, and --publish makes the record public. A
+production deposit first runs the offline citation gate (exactory-check gate).
+A production publish also needs the --confirm-publish flag, because a
+published DOI is permanent. Tokens come from ZENODO_SANDBOX_TOKEN /
+ZENODO_TOKEN. The API shape follows https://developers.zenodo.org. Python
+standard library only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+_PRODUCTION_API_URL = "https://zenodo.org/api"
+_SANDBOX_API_URL = "https://sandbox.zenodo.org/api"
+_TIMEOUT_SECONDS = 180
+_USER_AGENT = "exactory-draft/0.5.0"
+
+_WORKSPACE_DIR_NAMES = (".exactory", "draft", "evidence", "research", "reviews", "learnings")
+_DRAFT_STATE_PATH = Path(".exactory/draft.json")
+
+_LITERATURE_HEADER = (
+    "# Literature survey log\n"
+    "Append-only. Each search pass adds one block with: timestamp and context,"
+    " Queries, Found, Verdict, Impact.\n"
+)
+
+_AI_DISCLOSURE_TEMPLATE = (
+    "This preprint was prepared with AI assistance. The human author, {author},"
+    " reviewed the full content and is responsible for it."
+)
+
+def _exit_with_error(message: str, code: int = 1) -> None:
+    print(message, file=sys.stderr)
+    sys.exit(code)
+
+
+def _run_init(args: argparse.Namespace) -> None:
+    workspace_dir = Path(args.dir)
+    state_path = workspace_dir / _DRAFT_STATE_PATH
+    if state_path.exists():
+        _exit_with_error(f"{state_path} already exists."
+                         " This directory is already a draft workspace.")
+    for dir_name in _WORKSPACE_DIR_NAMES:
+        (workspace_dir / dir_name).mkdir(parents=True, exist_ok=True)
+    state = {"version": 1, "title": args.title, "corpus": args.corpus,
+             "category": args.category,
+             "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    (workspace_dir / "research" / "literature.md").write_text(
+        _LITERATURE_HEADER, encoding="utf-8"
+    )
+    print(f"Created the draft workspace in {workspace_dir.resolve()}.")
+
+
+# ----------------------------------------------------------- Zenodo deposit
+
+
+def _open_url(request: urllib.request.Request) -> dict:
+    """Send one Zenodo API request and return the parsed JSON body. Exits with
+    Zenodo's own error message on failure, and never echoes the token. Tests
+    replace this function; nothing else touches the network."""
+    try:
+        with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
+            body = response.read().decode("utf-8", "replace")
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:2000]
+        _exit_with_error(f"The Zenodo API returned HTTP {error.code}.\n{detail}")
+    except OSError as error:
+        _exit_with_error(f"The client cannot reach the Zenodo API. Cause: {error}."
+                         " Make sure that the network is available."
+                         " Then run the command again.")
+    raise AssertionError("unreachable")
+
+
+def _call_zenodo(method: str, url: str, token: str, json_body: dict | None = None,
+                 file_bytes: bytes | None = None) -> dict:
+    headers = {"Authorization": f"Bearer {token}", "User-Agent": _USER_AGENT}
+    data = None
+    if json_body is not None:
+        data = json.dumps(json_body).encode()
+        headers["Content-Type"] = "application/json"
+    elif file_bytes is not None:
+        data = file_bytes
+        headers["Content-Type"] = "application/octet-stream"
+    return _open_url(urllib.request.Request(url, method=method, data=data, headers=headers))
+
+
+def _read_zenodo_token(production: bool) -> str:
+    env_name = "ZENODO_TOKEN" if production else "ZENODO_SANDBOX_TOKEN"
+    token = os.environ.get(env_name, "").strip()
+    if token == "":
+        _exit_with_error(f"{env_name} is not set. Create a personal access token in the"
+                         " Zenodo account settings. Then set the variable.", 2)
+    return token
+
+
+def _load_draft_state() -> dict:
+    try:
+        return json.loads(_DRAFT_STATE_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        _exit_with_error(f"{_DRAFT_STATE_PATH} does not exist here."
+                         " Run exactory-draft init first.", 2)
+    except json.JSONDecodeError as error:
+        _exit_with_error(f"{_DRAFT_STATE_PATH} is not valid JSON. Cause: {error}")
+    raise AssertionError("unreachable")
+
+
+def _find_newest_pdf() -> Path:
+    pdf_paths = sorted(Path("draft").rglob("*.pdf"), key=lambda path: path.stat().st_mtime)
+    if not pdf_paths:
+        _exit_with_error("There is no PDF under draft/. Build the paper first, or pass --pdf.", 2)
+    return pdf_paths[-1]
+
+
+def _build_deposit_metadata(title: str, creators: list[str]) -> dict:
+    return {
+        "upload_type": "publication",
+        "publication_type": "preprint",
+        "title": title,
+        "creators": [{"name": creator_name} for creator_name in creators],
+        "description": _AI_DISCLOSURE_TEMPLATE.format(author=creators[0]),
+    }
+
+
+def _run_deposit(args: argparse.Namespace) -> None:
+    state = _load_draft_state()
+    pdf_path = Path(args.pdf) if args.pdf else _find_newest_pdf()
+    if not pdf_path.exists():
+        _exit_with_error(f"The file {pdf_path} does not exist.", 2)
+    sources_path = Path(args.sources) if args.sources else None
+    if sources_path is not None and not sources_path.exists():
+        _exit_with_error(f"The file {sources_path} does not exist.", 2)
+    token = _read_zenodo_token(args.production)
+    if args.publish and args.production and not args.confirm_publish:
+        _exit_with_error("A production publish is permanent. Get the user's approval"
+                         " first. Then run the command again with --confirm-publish.")
+    if args.production:
+        # A production deposit must pass the offline citation gate. The gate
+        # command owns the checks; this command only forwards its refusal.
+        gate_process = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("exactory-check")),
+             "gate", "--workspace", str(Path.cwd())],
+            capture_output=True,
+            text=True,
+        )
+        if gate_process.returncode != 0:
+            sys.stderr.write(gate_process.stderr)
+            sys.exit(1)
+
+    base_url = _PRODUCTION_API_URL if args.production else _SANDBOX_API_URL
+    deposition = _call_zenodo("POST", f"{base_url}/deposit/depositions", token, json_body={})
+    bucket_url = deposition["links"]["bucket"]
+    _call_zenodo("PUT", f"{bucket_url}/{pdf_path.name}", token,
+                 file_bytes=pdf_path.read_bytes())
+    if sources_path is not None:
+        _call_zenodo("PUT", f"{bucket_url}/{sources_path.name}", token,
+                     file_bytes=sources_path.read_bytes())
+    metadata = _build_deposit_metadata(state["title"], args.creator)
+    _call_zenodo("PUT", f"{base_url}/deposit/depositions/{deposition['id']}",
+                 token, json_body={"metadata": metadata})
+
+    if args.publish:
+        # Per https://developers.zenodo.org, doi is present only on published
+        # depositions; conceptdoi names the paper across all its versions.
+        published = _call_zenodo(
+            "POST", f"{base_url}/deposit/depositions/{deposition['id']}/actions/publish", token
+        )
+        print(f"The record is published: {published.get('links', {}).get('record_html', '')}")
+        print(f"Record DOI: {published.get('doi', '')}")
+        print(f"Concept DOI: {published.get('conceptdoi', '')}")
+    else:
+        print(f"The draft deposit is created. Review it at: {deposition['links'].get('html', '')}")
+        print("Zenodo assigns the record DOI and the concept DOI when you publish the record.")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="exactory-draft", description=__doc__,
+                                     allow_abbrev=False)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    init = commands.add_parser("init", allow_abbrev=False,
+                               help="Create the draft workspace layout.")
+    init.add_argument("--dir", default=".",
+                      help="Workspace directory (default: the current directory).")
+    init.add_argument("--title", required=True, help="Working title of the paper.")
+    init.add_argument("--category", required=True,
+                      help="arXiv taxonomy category, for example cs.MA.")
+    init.add_argument("--corpus", default="arxiv",
+                      help="Corpus the cohort is stated against (default: arxiv).")
+    init.set_defaults(handler=_run_init)
+
+    deposit = commands.add_parser("deposit", allow_abbrev=False,
+                                  help="Deposit the built PDF to Zenodo.")
+    deposit.add_argument("--production", action="store_true",
+                         help="Use zenodo.org (default: sandbox.zenodo.org).")
+    deposit.add_argument("--publish", action="store_true",
+                         help="Publish the record (default: leave it as a draft).")
+    deposit.add_argument("--confirm-publish", action="store_true",
+                         help="Confirm a production publish. Add this flag only after"
+                              " the user approves, because a published DOI is permanent.")
+    deposit.add_argument("--pdf",
+                         help="Path of the PDF (default: the newest .pdf under draft/).")
+    deposit.add_argument("--sources",
+                         help="Path of an optional sources archive (zip or tarball) to attach.")
+    deposit.add_argument("--creator", action="append", required=True,
+                         help='Author as "Family name, Given names". Repeat for more authors.')
+    deposit.set_defaults(handler=_run_deposit)
+
+    return parser
+
+
+def main() -> None:
+    args = _build_parser().parse_args()
+    args.handler(args)
+
+
+if __name__ == "__main__":
+    main()

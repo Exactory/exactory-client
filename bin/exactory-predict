@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""exactory-predict: deterministic steps of the exactory verifier.
+
+Two commands:
+  cohort   - freeze the cohort definition, from the task's own fields (no network) or,
+             as a fallback, by reading the paper's source metadata
+  compose  - turn a stated prediction into a valid review payload
+
+The model decides the numbers. This tool does the arithmetic and the JSON, so the
+payload cannot drift from the contract by hand-editing.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+
+_ARXIV_API_URL = "https://export.arxiv.org/api/query"
+_ZENODO_API_URL = "https://zenodo.org/api/records"
+_TIMEOUT_SECONDS = 30
+_USER_AGENT = "exactory-predict/0.5.0"
+
+# v1 provisional measurement ages (design 2026-08-06 §5). Frozen into every payload,
+# so a later per-field refinement changes future predictions only.
+_INITIAL_AGE_MONTHS = 12
+_LIFELONG_AGE_MONTHS = 60
+
+# The verifier's own floor: a sigma below this states a certainty about citation
+# futures that no evidence supports.
+_SIGMA_FLOOR = 0.3
+_SIGMA_CEILING = 10.0
+_LOGIT_BOUND = 10.0
+_DELTA_BOUND = 20.0
+
+_ATOM_NS = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+
+
+def _exit_with_error(message: str, code: int = 1) -> None:
+    print(message, file=sys.stderr)
+    sys.exit(code)
+
+
+def _compute_quarter_window(published: str) -> tuple[str, str]:
+    """Map an ISO date to its calendar quarter: the v1 cohort time window."""
+    year, month = int(published[0:4]), int(published[5:7])
+    quarter_start_month = 3 * ((month - 1) // 3) + 1
+    last_days = {1: "03-31", 4: "06-30", 7: "09-30", 10: "12-31"}
+    return (
+        f"{year}-{quarter_start_month:02d}-01",
+        f"{year}-{last_days[quarter_start_month]}",
+    )
+
+
+def _read_arxiv_cohort_inputs(arxiv_id: str) -> tuple[str, str]:
+    """Return the paper's primary category and publication date, both from arXiv."""
+    query = urllib.parse.urlencode({"id_list": arxiv_id})
+    request = urllib.request.Request(
+        f"{_ARXIV_API_URL}?{query}", headers={"User-Agent": _USER_AGENT}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
+            feed = ET.parse(response)
+    except OSError as error:
+        _exit_with_error(f"The client cannot reach the arXiv API. Cause: {error}."
+                         " Make sure that the network is available."
+                         " Then run the command again.")
+
+    entry = feed.find("atom:entry", _ATOM_NS)
+    category = None if entry is None else entry.find("arxiv:primary_category", _ATOM_NS)
+    published = None if entry is None else entry.findtext("atom:published", None, _ATOM_NS)
+    if entry is None or category is None or published is None:
+        _exit_with_error(f"The arXiv API returned no usable entry for id {arxiv_id}."
+                         " Make sure that the arXiv id is correct.")
+
+    return category.get("term"), published
+
+
+def _read_zenodo_published_date(record_id: str) -> str:
+    """Return the record's publication date. Zenodo carries no field classification."""
+    request = urllib.request.Request(
+        f"{_ZENODO_API_URL}/{record_id}", headers={"User-Agent": _USER_AGENT}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
+            record = json.load(response)
+    except OSError as error:
+        _exit_with_error(f"The client cannot reach the Zenodo API. Cause: {error}."
+                         " Make sure that the network is available."
+                         " Then run the command again.")
+
+    published = record.get("metadata", {}).get("publication_date")
+    if not published:
+        _exit_with_error(f"The Zenodo record {record_id} carries no publication date."
+                         " Pass --published together with --category and --corpus"
+                         " instead.")
+    return published
+
+
+def _run_cohort(args: argparse.Namespace) -> None:
+    # A paper is ranked against the canonical corpus of its field, whatever source it was
+    # submitted from (design 2026-08-06 §4). The task API now carries primaryCategory and
+    # publishedAt (arXiv) or a verifier-stated corpus/category and publishedAt (Zenodo)
+    # directly, so --published together with --category and --corpus computes the cohort
+    # with no network call. --arxiv-id and --zenodo-id remain as fallbacks that read the
+    # source API, for a task that predates those fields.
+    sources_given = sum(bool(value) for value in (args.published, args.arxiv_id, args.zenodo_id))
+    if sources_given == 0:
+        _exit_with_error(
+            "Pass a source: --published together with --category and --corpus,"
+            " --arxiv-id, or --zenodo-id."
+        )
+    if sources_given > 1:
+        _exit_with_error(
+            "Pass exactly one source: --published, --arxiv-id, or --zenodo-id."
+            " Combining them is ambiguous."
+        )
+
+    if args.published:
+        if not (args.category and args.corpus):
+            _exit_with_error(
+                "--published needs --category and --corpus together: this is the"
+                " direct-input path, computed with no network call."
+            )
+        corpus, category, published = args.corpus, args.category, args.published
+    elif args.arxiv_id:
+        category, published = _read_arxiv_cohort_inputs(args.arxiv_id)
+        corpus = args.corpus or "arxiv"
+        category = args.category or category
+    else:
+        if not (args.corpus and args.category):
+            _exit_with_error(
+                "A Zenodo paper needs --corpus and --category:"
+                " Zenodo records carry no field classification."
+            )
+        corpus, category = args.corpus, args.category
+        published = _read_zenodo_published_date(args.zenodo_id)
+
+    window_start, window_end = _compute_quarter_window(published)
+    json.dump(
+        {
+            "corpus": corpus,
+            "primaryCategory": category,
+            "windowStart": window_start,
+            "windowEnd": window_end,
+            "initialAgeMonths": _INITIAL_AGE_MONTHS,
+            "lifelongAgeMonths": _LIFELONG_AGE_MONTHS,
+        },
+        sys.stdout,
+        indent=2,
+    )
+    print()
+
+
+def _convert_percentile_to_logit(percentile: float) -> float:
+    if not 0.0 < percentile < 1.0:
+        _exit_with_error(
+            f"The percentile must be between 0 and 1, exclusive."
+            f" The value {percentile} is outside this range."
+        )
+    logit = math.log(percentile / (1.0 - percentile))
+    if abs(logit) > _LOGIT_BOUND:
+        _exit_with_error(
+            f"The percentile {percentile} is too close to 0 or 1 to represent."
+            " Use a percentile between 0.0001 and 0.9999."
+        )
+    return round(logit, 4)
+
+
+def _require_sigma_in_range(name: str, sigma: float) -> None:
+    if sigma < _SIGMA_FLOOR:
+        _exit_with_error(
+            f"{name} is {sigma}, below the floor of {_SIGMA_FLOOR}. A narrower"
+            " distribution states a certainty the evidence cannot support. Widen it."
+        )
+    if sigma > _SIGMA_CEILING:
+        _exit_with_error(f"{name} is {sigma}, above the ceiling of {_SIGMA_CEILING}.")
+
+
+def _run_compose(args: argparse.Namespace) -> None:
+    try:
+        with open(args.cohort_file, encoding="utf-8") as handle:
+            cohort = json.load(handle)
+    except FileNotFoundError:
+        _exit_with_error(f"The file {args.cohort_file} does not exist. Run cohort first.")
+    except json.JSONDecodeError as error:
+        _exit_with_error(f"The file {args.cohort_file} is not valid JSON. Cause: {error}")
+
+    try:
+        with open(args.rationale_file, encoding="utf-8") as handle:
+            rationale = handle.read().strip()
+    except FileNotFoundError:
+        _exit_with_error(f"The file {args.rationale_file} does not exist.")
+    if rationale == "":
+        _exit_with_error("The rationale file is empty. State the evidence behind the numbers.")
+
+    _require_sigma_in_range("--initial-sigma", args.initial_sigma)
+    _require_sigma_in_range("--delta-sigma", args.delta_sigma)
+    if abs(args.delta) > _DELTA_BOUND:
+        _exit_with_error(f"--delta is {args.delta}, outside ±{_DELTA_BOUND}.")
+
+    review = {
+        "claims": [
+            {
+                "claimType": "impact_prediction",
+                "payload": {
+                    "cohort": cohort,
+                    "initial": {
+                        "logitMean": _convert_percentile_to_logit(args.initial_percentile),
+                        "logitSigma": args.initial_sigma,
+                    },
+                    "lifelongDelta": {"mean": args.delta, "sigma": args.delta_sigma},
+                    "rationale": rationale[:8000],
+                },
+            }
+        ]
+    }
+    with open(args.out, "w", encoding="utf-8") as handle:
+        json.dump(review, handle, indent=2)
+    print(f"The payload is in {args.out}."
+          f" Submit it with: exactory submit-review <id> --file {args.out}")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="exactory-predict", description=__doc__,
+                                     allow_abbrev=False)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    cohort = commands.add_parser(
+        "cohort", allow_abbrev=False,
+        help="Freeze the cohort definition, from the task's fields or a source API."
+    )
+    source = cohort.add_mutually_exclusive_group()
+    source.add_argument(
+        "--arxiv-id", help="For example 2301.00001. Fallback: calls the arXiv API."
+    )
+    source.add_argument(
+        "--zenodo-id", help="A Zenodo record id, for example 21381192. Fallback:"
+        " calls the Zenodo API."
+    )
+    cohort.add_argument(
+        "--published",
+        help="ISO date, for example 2026-07-15 (the task's publishedAt date part)."
+        " With --category and --corpus, computes the cohort with no network call.",
+    )
+    cohort.add_argument(
+        "--corpus",
+        help="The corpus the percentile is stated against, for example arxiv."
+        " Required with --published or --zenodo-id.",
+    )
+    cohort.add_argument(
+        "--category",
+        help="The field the paper is ranked within, for example cs.MA."
+        " Required with --published or --zenodo-id.",
+    )
+    cohort.set_defaults(handler=_run_cohort)
+
+    compose = commands.add_parser("compose", allow_abbrev=False,
+                                  help="Build the review payload file.")
+    compose.add_argument("--cohort-file", required=True, help="Output of the cohort command.")
+    compose.add_argument(
+        "--initial-percentile",
+        type=float,
+        required=True,
+        help="Fraction of cohort papers this paper out-cites at the initial age."
+        " 0.90 means top 10%%.",
+    )
+    compose.add_argument("--initial-sigma", type=float, required=True)
+    compose.add_argument(
+        "--delta",
+        type=float,
+        required=True,
+        help="Logit-scale shift from initial to lifelong. A negative value means"
+             " the paper loses rank after its start.",
+    )
+    compose.add_argument("--delta-sigma", type=float, required=True)
+    compose.add_argument("--rationale-file", required=True)
+    compose.add_argument("--out", default="review.json")
+    compose.set_defaults(handler=_run_compose)
+
+    return parser
+
+
+def main() -> None:
+    args = _build_parser().parse_args()
+    args.handler(args)
+
+
+if __name__ == "__main__":
+    main()

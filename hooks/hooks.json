@@ -1,0 +1,29 @@
+{
+  "description": "Citation-integrity hooks: a blocking PreToolUse gate on submission and production deposit, and an advisory PostToolUse check on references edits.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/enforce_citation_check.py\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/check_references_edit.py\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,72 @@
+"""Tests for the plugin manifest, the marketplace manifest, and the file layout."""
+
+from __future__ import annotations
+
+import json
+import os
+import py_compile
+import tempfile
+import unittest
+from pathlib import Path
+
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+_MARKETPLACE_MANIFEST_PATH = (
+    _PLUGIN_ROOT.parent / "marketplace" / ".claude-plugin" / "marketplace.json"
+)
+
+
+def _compile_python_source(path: Path) -> None:
+    with tempfile.TemporaryDirectory() as scratch_dir:
+        py_compile.compile(str(path), cfile=os.path.join(scratch_dir, "out.pyc"), doraise=True)
+
+
+class TestPluginManifest(unittest.TestCase):
+    def test_plugin_manifest_parses_and_carries_the_release_version(self) -> None:
+        manifest = json.loads((_PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text())
+        self.assertEqual(manifest["name"], "exactory")
+        self.assertEqual(manifest["version"], "0.5.0")
+
+
+class TestMarketplaceManifest(unittest.TestCase):
+    def setUp(self) -> None:
+        if not _MARKETPLACE_MANIFEST_PATH.exists():
+            self.skipTest("the marketplace repo is not checked out next to this one")
+
+    def test_marketplace_lists_one_plugin_and_the_rename(self) -> None:
+        manifest = json.loads(_MARKETPLACE_MANIFEST_PATH.read_text())
+        self.assertEqual([entry["name"] for entry in manifest["plugins"]], ["exactory"])
+        self.assertEqual(manifest["renames"], {"exactory-verifier": "exactory"})
+
+
+class TestSkillLayout(unittest.TestCase):
+    def test_every_skill_directory_has_a_skill_file_with_frontmatter(self) -> None:
+        skill_dirs = [path for path in (_PLUGIN_ROOT / "skills").iterdir() if path.is_dir()]
+        self.assertTrue(skill_dirs)
+        for skill_dir in skill_dirs:
+            with self.subTest(skill=skill_dir.name):
+                lines = (skill_dir / "SKILL.md").read_text().splitlines()
+                self.assertEqual(lines[0], "---")
+                frontmatter = lines[1 : lines.index("---", 1)]
+                self.assertTrue(any(line.startswith("description:") for line in frontmatter))
+
+
+class TestExecutableSources(unittest.TestCase):
+    def test_every_bin_command_has_a_shebang_and_compiles(self) -> None:
+        for path in sorted((_PLUGIN_ROOT / "bin").iterdir()):
+            with self.subTest(command=path.name):
+                self.assertTrue(path.read_text().startswith("#!"))
+                _compile_python_source(path)
+
+    def test_every_hook_script_has_a_shebang_and_compiles(self) -> None:
+        hooks_dir = _PLUGIN_ROOT / "hooks"
+        self.assertTrue(hooks_dir.is_dir())
+        hook_scripts = sorted(hooks_dir.glob("*.py"))
+        self.assertTrue(hook_scripts)
+        for path in hook_scripts:
+            with self.subTest(script=path.name):
+                self.assertTrue(path.read_text().startswith("#!"))
+                _compile_python_source(path)
+
+
+if __name__ == "__main__":
+    unittest.main()

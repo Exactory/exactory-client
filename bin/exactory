@@ -3,6 +3,8 @@
 
 Python standard library only. Authentication comes from EXACTORY_API_KEY.
 The API base URL comes from EXACTORY_API_URL (default: https://www.exactory.ai).
+Inside a draft workspace, submit first runs the offline citation gate
+(exactory-check gate) and stops when the gate fails.
 """
 
 from __future__ import annotations
@@ -10,21 +12,27 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 _DEFAULT_API_URL = "https://www.exactory.ai"
 _TIMEOUT_SECONDS = 30
+_BARE_ARXIV_ID_RE = re.compile(r"(\d{4}\.\d{4,5})(?:v\d+)?")
 
 _HTTP_ERR_MSGS = {
     401: "The server rejected the API key. Make sure that EXACTORY_API_KEY holds a current key.",
-    403: "The server refused this operation for this account.",
-    404: "The server did not find this resource.",
-    409: "The resource is in a state that does not accept this operation.",
-    422: "The server rejected the request body.",
-    429: "The rate limit is reached. Wait one minute, then send the request again.",
+    403: "The server refused this operation for this account."
+         " Use an account that has permission for it.",
+    404: "The server did not find this resource. Make sure that the identifier is correct.",
+    409: "The resource is in a state that does not accept this operation."
+         " Run exactory status <verification-id> to see the current state.",
+    422: "The server rejected the request body. Correct the body. Then send it again.",
+    429: "The rate limit is reached. Wait one minute. Then send the request again.",
     503: "The paper source is not reachable now. Send the same request again later.",
 }
 
@@ -34,12 +42,13 @@ def _exit_with_error(message: str, code: int = 1) -> None:
     sys.exit(code)
 
 
-def _send_request(method: str, path: str, body: dict | None = None) -> dict:
+def _send_request(method: str, path: str, body: dict | None = None) -> tuple[dict, int]:
+    """Send one API request. Returns the parsed JSON body and the HTTP status."""
     api_key = os.environ.get("EXACTORY_API_KEY", "").strip()
     if api_key == "":
         _exit_with_error(
-            "EXACTORY_API_KEY is not set. Create a key at https://www.exactory.ai/console"
-            " and set the variable.",
+            "EXACTORY_API_KEY is not set. Create a key at"
+            " https://www.exactory.ai/console. Then set the variable.",
             2,
         )
 
@@ -51,19 +60,21 @@ def _send_request(method: str, path: str, body: dict | None = None) -> dict:
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "exactory-client/0.1.0",
+            "User-Agent": "exactory-client/0.5.0",
         },
     )
 
     try:
         with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
-            return json.load(response)
+            return json.load(response), response.getcode()
     except urllib.error.HTTPError as error:
         detail = error.read().decode(errors="replace")[:2000]
         message = _HTTP_ERR_MSGS.get(error.code, f"The server returned HTTP {error.code}.")
         _exit_with_error(f"{message}\n{detail}")
     except urllib.error.URLError as error:
-        _exit_with_error(f"The client could not reach {base_url}. Cause: {error.reason}")
+        _exit_with_error(f"The client cannot reach {base_url}. Cause: {error.reason}."
+                         " Make sure that the network and EXACTORY_API_URL are correct."
+                         " Then send the request again.")
     raise AssertionError("unreachable")
 
 
@@ -73,28 +84,62 @@ def _print_json(payload: dict) -> None:
 
 
 def _run_submit(args: argparse.Namespace) -> None:
+    # Inside a draft workspace, the offline citation gate must pass first. The
+    # gate command owns the checks; this command only forwards its refusal.
+    start_dir = Path.cwd().resolve()
+    workspace = next(
+        (directory for directory in (start_dir, *start_dir.parents)
+         if (directory / ".exactory" / "draft.json").is_file()),
+        None,
+    )
+    if workspace is not None:
+        gate_process = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("exactory-check")),
+             "gate", "--workspace", str(workspace)],
+            capture_output=True,
+            text=True,
+        )
+        if gate_process.returncode != 0:
+            sys.stderr.write(gate_process.stderr)
+            sys.exit(1)
+
     if args.arxiv_id:
         body = {"arxivId": args.arxiv_id}
     elif args.doi:
         body = {"doi": args.doi}
     else:
         body = {"url": args.url}
-    _print_json(_send_request("POST", "/api/v1/verifications", body))
+    payload, status = _send_request("POST", "/api/v1/verifications", body)
+    if status == 200:
+        print("The server returned the existing open request for this paper.",
+              file=sys.stderr)
+    _print_json(payload)
 
 
 def _run_status(args: argparse.Namespace) -> None:
-    _print_json(_send_request("GET", f"/api/v1/verifications/{args.verification_id}"))
+    payload, _ = _send_request(
+        "GET",
+        "/api/v1/verifications/" + urllib.parse.quote(args.verification_id, safe=""),
+    )
+    _print_json(payload)
 
 
 def _run_tasks(args: argparse.Namespace) -> None:
     query = {"limit": str(args.limit)}
     if args.cursor:
         query["cursor"] = args.cursor
-    _print_json(_send_request("GET", "/api/v1/tasks?" + urllib.parse.urlencode(query)))
+    payload, _ = _send_request("GET", "/api/v1/tasks?" + urllib.parse.urlencode(query))
+    _print_json(payload)
 
 
 def _run_paper(args: argparse.Namespace) -> None:
-    _print_json(_send_request("GET", "/api/v1/papers/" + urllib.parse.quote(args.identifier)))
+    identifier = args.identifier
+    match = _BARE_ARXIV_ID_RE.fullmatch(identifier)
+    if match:
+        # The server looks papers up by DOI; a bare arXiv id maps to its DataCite DOI.
+        identifier = "10.48550/arxiv." + match.group(1)
+    payload, _ = _send_request("GET", "/api/v1/papers/" + urllib.parse.quote(identifier))
+    _print_json(payload)
 
 
 def _run_submit_review(args: argparse.Namespace) -> None:
@@ -102,19 +147,28 @@ def _run_submit_review(args: argparse.Namespace) -> None:
         with open(args.file, encoding="utf-8") as handle:
             review = json.load(handle)
     except FileNotFoundError:
-        _exit_with_error(f"The file {args.file} does not exist.")
+        _exit_with_error(f"The file {args.file} does not exist."
+                         " Make sure that the path is correct.")
     except json.JSONDecodeError as error:
-        _exit_with_error(f"The file {args.file} is not valid JSON. Cause: {error}")
-    _print_json(
-        _send_request("POST", f"/api/v1/verifications/{args.verification_id}/reviews", review)
+        _exit_with_error(f"The file {args.file} is not valid JSON. Cause: {error}."
+                         " Correct the file. Then send it again.")
+    payload, _ = _send_request(
+        "POST",
+        "/api/v1/verifications/"
+        + urllib.parse.quote(args.verification_id, safe="")
+        + "/reviews",
+        review,
     )
+    _print_json(payload)
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="exactory", description=__doc__)
+    parser = argparse.ArgumentParser(prog="exactory", description=__doc__,
+                                     allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
 
-    submit = commands.add_parser("submit", help="Submit a paper for verification.")
+    submit = commands.add_parser("submit", allow_abbrev=False,
+                                 help="Submit a paper for verification.")
     identifier = submit.add_mutually_exclusive_group(required=True)
     identifier.add_argument("--arxiv-id", help="An arXiv id, for example 2301.00001.")
     identifier.add_argument(
@@ -127,21 +181,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     submit.set_defaults(handler=_run_submit)
 
-    status = commands.add_parser("status", help="Show one verification with its claims.")
+    status = commands.add_parser("status", allow_abbrev=False,
+                                 help="Show one verification with its claims.")
     status.add_argument("verification_id")
     status.set_defaults(handler=_run_status)
 
-    tasks = commands.add_parser("tasks", help="List open verification tasks.")
+    tasks = commands.add_parser("tasks", allow_abbrev=False,
+                                help="List open verification tasks.")
     tasks.add_argument("--cursor", help="Opaque cursor from a previous page.")
     tasks.add_argument("--limit", type=int, default=25)
     tasks.set_defaults(handler=_run_tasks)
 
-    paper = commands.add_parser("paper", help="Show a stored paper.")
+    paper = commands.add_parser("paper", allow_abbrev=False, help="Show a stored paper.")
     paper.add_argument("identifier", help="A DOI or an arXiv id.")
     paper.set_defaults(handler=_run_paper)
 
     submit_review = commands.add_parser(
-        "submit-review", help="Submit a review payload for one verification."
+        "submit-review", allow_abbrev=False,
+        help="Submit a review payload for one verification."
     )
     submit_review.add_argument("verification_id")
     submit_review.add_argument("--file", required=True, help="Path of the review JSON file.")

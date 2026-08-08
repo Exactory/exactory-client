@@ -1,0 +1,15 @@
+{
+  "data": {
+    "id": "10.5555/data.999",
+    "type": "dois",
+    "attributes": {
+      "doi": "10.5555/data.999",
+      "titles": [{"title": "A Dataset Paper Registered with DataCite"}],
+      "creators": [
+        {"name": "Registry, Grace", "givenName": "Grace", "familyName": "Registry"}
+      ],
+      "publicationYear": 2021,
+      "types": {"bibtex": "misc"}
+    }
+  }
+}

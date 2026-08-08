@@ -1,0 +1,15 @@
+{
+  "header": {"type": "esummary", "version": "0.3"},
+  "result": {
+    "uids": ["12345678"],
+    "12345678": {
+      "uid": "12345678",
+      "title": "Predicting Citation Impact with Cohort Percentiles.",
+      "authors": [
+        {"name": "Instance C", "authtype": "Author"},
+        {"name": "Case D", "authtype": "Author"}
+      ],
+      "pubdate": "2023 May 10"
+    }
+  }
+}
